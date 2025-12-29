@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>부엉이 바위 싸움</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <div class="logo">🦉</div>
+        <div>
+          <div class="title">부엉이 바위 싸움</div>
+          <div class="sub">Owl Rock Fight</div>
+        </div>
+      </div>
+
+      <div class="profile">
+        <div class="nick">
+          <input id="nameInput" maxlength="16" placeholder="닉네임" />
+          <button id="saveNameBtn">저장</button>
+        </div>
+        <div class="stats" id="statsBar">연결 중...</div>
+      </div>
+    </header>
+
+    <main class="main">
+      <aside class="menu">
+        <button class="btn" id="btnPlay">플레이</button>
+        <button class="btn" id="btnRanked">랭크전 플레이 하기 (Lv15)</button>
+        <button class="btn" id="btnShop">스킨 상점</button>
+        <button class="btn" id="btnLeader">리더보드</button>
+        <button class="btn ghost" id="btnHow">조작/설명</button>
+      </aside>
+
+      <section class="panel">
+        <div id="viewLobby" class="view">
+          <div class="card">
+            <h2>로비</h2>
+            <p class="muted">
+              로컬 2P / AI전 / 온라인 매칭(일반/랭크)을 지원해.
+              <br/>랭크전은 <b>Lv15부터</b> 가능!
+            </p>
+
+            <div class="grid2">
+              <div class="mini">
+                <h3>플레이</h3>
+                <div class="row">
+                  <button class="btn small" id="btnLocal2P">로컬 2P</button>
+                  <button class="btn small" id="btnVsAI">AI전</button>
+                </div>
+                <button class="btn small" id="btnCasualMM">온라인 일반 매칭</button>
+              </div>
+
+              <div class="mini">
+                <h3>랭크</h3>
+                <p class="muted">Lv15 이상이면 전세계 상대와 매칭돼.</p>
+                <button class="btn small" id="btnRankMM">온라인 랭크 매칭</button>
+                <div id="rankLockMsg" class="muted tiny"></div>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+            <p class="tiny muted">
+              Tip: 바위 피격 시 화면 흔들림 + 임팩트 사운드가 나와. 스킨을 바꾸면 바위 색/트레일도 바뀜.
+            </p>
+          </div>
+        </div>
+
+        <div id="viewShop" class="view hidden">
+          <div class="card">
+            <h2>스킨 상점 (바위)</h2>
+            <div id="shopList" class="shop"></div>
+          </div>
+        </div>
+
+        <div id="viewLeader" class="view hidden">
+          <div class="card">
+            <h2>글로벌 리더보드</h2>
+            <div id="leaderList" class="leader"></div>
+          </div>
+        </div>
+
+        <div id="viewHow" class="view hidden">
+          <div class="card">
+            <h2>조작 / 룰</h2>
+            <ul class="how">
+              <li><b>로컬 2P</b>:
+                P1 = A/D 이동, W 점프, R 발사 /
+                P2 = ←/→ 이동, ↑ 점프, Enter 발사</li>
+              <li><b>온라인</b>: 본인 캐릭터만 조작 (A/D 이동, W 점프, R 발사)</li>
+              <li>상대에게 바위를 맞히면 상대 HP가 깎여. HP 0이면 승리!</li>
+              <li>승패에 따라 XP/루비 획득, 랭크는 레이팅 변동.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div id="viewGame" class="view hidden">
+          <div class="hud">
+            <div id="hudLeft">-</div>
+            <div id="hudMid" class="muted">-</div>
+            <div id="hudRight">-</div>
+          </div>
+          <canvas id="game" width="900" height="450"></canvas>
+          <div class="gameBar">
+            <button class="btn small ghost" id="btnExitGame">나가기</button>
+            <div id="matchMsg" class="muted tiny"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="client.js"></script>
+</body>
+</html>
