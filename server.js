@@ -181,8 +181,8 @@ function updateRating(pA, pB, winnerId) {
 }
 
 // -------------------- Match rules --------------------
-const MAX_ROUNDS = 10; // 7판제
-const WIN_ROUNDS = 5; // 4선승
+const MAX_ROUNDS = 7; // 7판제
+const WIN_ROUNDS = 4; // 4선승
 const HITS_TO_WIN_ROUND = 5; // 한 라운드 5번 맞추면 승리
 const ROCK_SPEED = 620; // 바위 속도(살짝 낮춤)
 const SHOOT_COOLDOWN = 0.65; // 연사(살짝 느리게)
@@ -642,4 +642,3 @@ server.listen(PORT, () => {
   console.log("Server running on port", PORT);
   console.log("DB_PATH =", DB_PATH);
 });
-
