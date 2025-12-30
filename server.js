@@ -15,15 +15,15 @@ const io = new Server(server, {
 app.use(express.static(path.join(__dirname, "public")));
 
 // -------------------- Persistent DB path --------------------
-// Render에서 Disk mount path를 /var/data로 두면 이 경로 아래만 유지됨.
-const PERSIST_ROOT =
+// Render에서 Persistent Disk를 /var/data 로 마운트하면 영구 저장됨
+const DATA_DIR =
   process.env.DATA_DIR ||
   (fs.existsSync("/var/data") ? "/var/data" : path.join(__dirname, "data"));
 
-const DB_PATH = path.join(PERSIST_ROOT, "owl_rockfight", "db.json");
+const DB_PATH = path.join(DATA_DIR, "owl_rockfight", "db.json");
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
-// -------------------- DB (json) --------------------
+// -------------------- DB --------------------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
     const init = { players: {}, leaderboard: [] };
@@ -39,31 +39,16 @@ function loadDB() {
 let DB = loadDB();
 let dirty = false;
 
-function flushDB() {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(DB, null, 2), "utf8");
-  } catch {}
-}
-
 function saveDBSoon() {
   dirty = true;
 }
-
 setInterval(() => {
   if (!dirty) return;
   dirty = false;
-  flushDB();
-}, 1200);
-
-// 종료/재시작 직전에 최대한 저장
-process.on("SIGTERM", () => {
-  flushDB();
-  process.exit(0);
-});
-process.on("SIGINT", () => {
-  flushDB();
-  process.exit(0);
-});
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(DB, null, 2), "utf8");
+  } catch {}
+}, 800);
 
 // -------------------- helpers --------------------
 function clamp(n, a, b) {
@@ -71,7 +56,6 @@ function clamp(n, a, b) {
 }
 
 function xpToLevel(xp) {
-  // 완만한 성장: Lv ≈ 1 + floor(sqrt(xp / 120))
   return 1 + Math.floor(Math.sqrt(Math.max(0, Number(xp) || 0) / 120));
 }
 
@@ -79,42 +63,15 @@ function nowMs() {
   return Date.now();
 }
 
-// ---------- Tier (rating -> tier/div) ----------
-const TIERS = [
-  { name: "아이언",  min: 0 },
-  { name: "브론즈",  min: 900 },
-  { name: "실버",    min: 1100 },
-  { name: "골드",    min: 1300 },
-  { name: "플래티넘", min: 1500 },
-  { name: "다이아",  min: 1700 },
-  { name: "마스터",    min: 1900 },
-  { name: "챌린저",    min: 2100 },
-];
-
-function ratingToTier(rating) {
-  const r = Number(rating) || 0;
-  let tier = TIERS[0].name;
-  let tierMin = TIERS[0].min;
-  let nextMin = Infinity;
-
-  for (let i = 0; i < TIERS.length; i++) {
-    if (r >= TIERS[i].min) {
-      tier = TIERS[i].name;
-      tierMin = TIERS[i].min;
-      nextMin = (i + 1 < TIERS.length) ? TIERS[i + 1].min : Infinity;
-    }
-  }
-
-  // division: 3~1 (상위로 갈수록 1)
-  // 각 티어 구간을 3등분 (불멸은 division 없음)
-  let division = null;
-  if (nextMin !== Infinity) {
-    const span = Math.max(1, nextMin - tierMin);
-    const pos = clamp((r - tierMin) / span, 0, 0.999999);
-    const idx = Math.floor(pos * 3); // 0,1,2
-    division = 3 - idx; // 3,2,1
-  }
-  return { tier, division };
+function tierFromRating(r) {
+  const rating = Number(r) || 0;
+  if (rating >= 2200) return { name: "챌린저", color: "#ff4b4b" };
+  if (rating >= 2000) return { name: "마스터", color: "#ffd34b" };
+  if (rating >= 1800) return { name: "다이아", color: "#4b7bff" };
+  if (rating >= 1600) return { name: "플래티넘", color: "#2ee59d" };
+  if (rating >= 1400) return { name: "골드", color: "#f7d14a" };
+  if (rating >= 1200) return { name: "실버", color: "#cfd8dc" };
+  return { name: "브론즈", color: "#cd7f32" };
 }
 
 function ensurePlayer(profile) {
@@ -149,7 +106,7 @@ function ensurePlayer(profile) {
 }
 
 function publicProfile(p) {
-  const { tier, division } = ratingToTier(p.rating);
+  const tier = tierFromRating(p.rating);
   return {
     id: p.id,
     name: p.name,
@@ -159,8 +116,8 @@ function publicProfile(p) {
     rockSkin: p.rockSkin,
     ownedSkins: p.ownedSkins,
     rating: p.rating,
-    tier,
-    division, // 불멸이면 null
+    tier: tier.name,
+    tierColor: tier.color,
     wins: p.wins,
     losses: p.losses,
   };
@@ -168,13 +125,13 @@ function publicProfile(p) {
 
 function rebuildLeaderboard() {
   const arr = Object.values(DB.players).map((p) => {
-    const t = ratingToTier(p.rating);
+    const tier = tierFromRating(p.rating);
     return {
       id: p.id,
       name: p.name,
       rating: p.rating,
-      tier: t.tier,
-      division: t.division,
+      tier: tier.name,
+      tierColor: tier.color,
       wins: p.wins,
       losses: p.losses,
       level: xpToLevel(p.xp),
@@ -209,8 +166,8 @@ function awardAfterMatch(playerId, result, ranked) {
 
 function updateRating(pA, pB, winnerId) {
   const K = 28;
-  const Ra = pA.rating;
-  const Rb = pB.rating;
+  const Ra = pA.rating,
+    Rb = pB.rating;
 
   const Ea = 1 / (1 + Math.pow(10, (Rb - Ra) / 400));
   const Eb = 1 / (1 + Math.pow(10, (Ra - Rb) / 400));
@@ -222,6 +179,13 @@ function updateRating(pA, pB, winnerId) {
   pB.rating = Math.round(clamp(Rb + K * (Sb - Eb), 1, 9999));
   saveDBSoon();
 }
+
+// -------------------- Match rules --------------------
+const MAX_ROUNDS = 7; // 7판제
+const WIN_ROUNDS = 4; // 4선승
+const HITS_TO_WIN_ROUND = 5; // 한 라운드 5번 맞추면 승리
+const ROCK_SPEED = 620; // 바위 속도(살짝 낮춤)
+const SHOOT_COOLDOWN = 0.65; // 연사(살짝 느리게)
 
 // -------------------- Matchmaking --------------------
 const casualQueue = [];
@@ -242,67 +206,55 @@ function removeFromQueue(queue, socketId) {
   if (idx >= 0) queue.splice(idx, 1);
 }
 
-// -------------------- In-match simulation (server authoritative) --------------------
+// -------------------- In-match simulation --------------------
 const MATCHES = new Map();
 
-// 룰: 5번 맞추면 라운드 승, 최대 7라운드(4선승), 공속(발사쿨) 살짝 느리게
-const RULES = {
-  hitsToWinRound: 5,
-  maxRounds: 10,
-  winRounds: 5,          // best of 7
-  shootCooldown: 0.66,   // 원래 0.55 -> 살짝 느리게
-  betweenRoundsSec: 1.2,
-};
-
 function createMatchState(room, pLeft, pRight, ranked) {
-  const W = 900, H = 450;
+  const W = 900,
+    H = 450;
   const groundY = 360;
 
   return {
     room,
     ranked,
-    W, H, groundY,
+    W,
+    H,
+    groundY,
     startAt: nowMs(),
     over: false,
     winnerId: null,
 
     round: 1,
     score: { left: 0, right: 0 },
-    roundOver: false,
-    roundEndsAt: 0,
 
     players: {
-      left: { id: pLeft,  x: 120,     y: groundY, vx: 0, vy: 0, onGround: true, hp: RULES.hitsToWinRound, cooldown: 0 },
-      right:{ id: pRight, x: W - 120, y: groundY, vx: 0, vy: 0, onGround: true, hp: RULES.hitsToWinRound, cooldown: 0 },
+      left: {
+        id: pLeft,
+        x: 120,
+        y: groundY,
+        vx: 0,
+        vy: 0,
+        onGround: true,
+        hp: HITS_TO_WIN_ROUND,
+        cooldown: 0,
+      },
+      right: {
+        id: pRight,
+        x: W - 120,
+        y: groundY,
+        vx: 0,
+        vy: 0,
+        onGround: true,
+        hp: HITS_TO_WIN_ROUND,
+        cooldown: 0,
+      },
     },
     rocks: [],
     inputs: {
-      [pLeft]:  { l: false, r: false, j: false, shoot: false },
+      [pLeft]: { l: false, r: false, j: false, shoot: false },
       [pRight]: { l: false, r: false, j: false, shoot: false },
     },
   };
-}
-
-function resetRound(m) {
-  m.rocks = [];
-  m.players.left.x = 120;
-  m.players.left.y = m.groundY;
-  m.players.left.vx = 0;
-  m.players.left.vy = 0;
-  m.players.left.onGround = true;
-  m.players.left.hp = RULES.hitsToWinRound;
-  m.players.left.cooldown = 0;
-
-  m.players.right.x = m.W - 120;
-  m.players.right.y = m.groundY;
-  m.players.right.vx = 0;
-  m.players.right.vy = 0;
-  m.players.right.onGround = true;
-  m.players.right.hp = RULES.hitsToWinRound;
-  m.players.right.cooldown = 0;
-
-  m.roundOver = false;
-  m.roundEndsAt = 0;
 }
 
 function tryMatch(queue, ranked) {
@@ -329,23 +281,46 @@ function tryMatch(queue, ranked) {
     io.to(room).emit("match_start", {
       room,
       ranked,
-      rules: RULES,
       players: [
         { playerId: a.playerId, name: a.name, side: "left" },
         { playerId: b.playerId, name: b.name, side: "right" },
       ],
+      rules: { MAX_ROUNDS, WIN_ROUNDS, HITS_TO_WIN_ROUND },
     });
   }
 }
 
-function endMatch(m, winnerId) {
-  const left = m.players.left;
-  const right = m.players.right;
+function resetRound(m) {
+  const W = m.W,
+    groundY = m.groundY;
 
-  m.over = true;
-  m.winnerId = winnerId;
+  m.players.left.x = 120;
+  m.players.left.y = groundY;
+  m.players.left.vx = 0;
+  m.players.left.vy = 0;
+  m.players.left.onGround = true;
+  m.players.left.hp = HITS_TO_WIN_ROUND;
+  m.players.left.cooldown = 0;
 
-  const loserId = winnerId === left.id ? right.id : left.id;
+  m.players.right.x = W - 120;
+  m.players.right.y = groundY;
+  m.players.right.vx = 0;
+  m.players.right.vy = 0;
+  m.players.right.onGround = true;
+  m.players.right.hp = HITS_TO_WIN_ROUND;
+  m.players.right.cooldown = 0;
+
+  m.rocks = [];
+}
+
+function finalizeMatch(room, winnerId, reason) {
+  const m = MATCHES.get(room);
+  if (!m) return;
+
+  const leftId = m.players.left.id;
+  const rightId = m.players.right.id;
+  const loserId = winnerId === leftId ? rightId : leftId;
+
   const pW = DB.players[winnerId];
   const pL = DB.players[loserId];
 
@@ -356,11 +331,11 @@ function endMatch(m, winnerId) {
 
   rebuildLeaderboard();
 
-  io.to(m.room).emit("match_over", {
+  io.to(room).emit("match_over", {
     winnerId,
     ranked: m.ranked,
-    score: m.score,
-    roundsPlayed: m.round,
+    reason: reason || "normal",
+    finalScore: { ...m.score },
     profiles: {
       [winnerId]: pW ? publicProfile(pW) : null,
       [loserId]: pL ? publicProfile(pL) : null,
@@ -368,37 +343,21 @@ function endMatch(m, winnerId) {
     leaderboard: DB.leaderboard,
   });
 
-  MATCHES.delete(m.room);
+  MATCHES.delete(room);
 }
 
 function stepMatch(m, dt) {
   const speed = 320;
   const jumpV = -520;
   const gravity = 1400;
-  const rockSpeed = 680;
 
-  const hitboxW = 46, hitboxH = 62;
+  const hitboxW = 46,
+    hitboxH = 62;
+
   function rectHit(px, py, rx, ry, rw, rh) {
     return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
   }
 
-  // 라운드 종료 대기중이면 다음 라운드로 넘기기
-  if (m.roundOver) {
-    if (nowMs() >= m.roundEndsAt) {
-      // 다음 라운드 or 경기 종료는 이미 결정됨
-      resetRound(m);
-      io.to(m.room).emit("round_start", {
-        round: m.round,
-        score: m.score,
-      });
-    }
-    return;
-  }
-
-  const left = m.players.left;
-  const right = m.players.right;
-
-  // movement + shoot
   for (const side of ["left", "right"]) {
     const pl = m.players[side];
     const input = m.inputs[pl.id] || { l: false, r: false, j: false, shoot: false };
@@ -416,13 +375,13 @@ function stepMatch(m, dt) {
     pl.cooldown = Math.max(0, pl.cooldown - dt);
 
     if (input.shoot && pl.cooldown <= 0) {
-      pl.cooldown = RULES.shootCooldown;
+      pl.cooldown = SHOOT_COOLDOWN;
 
       const dir = side === "left" ? 1 : -1;
       m.rocks.push({
         x: pl.x + dir * 34,
         y: pl.y - 40,
-        vx: dir * rockSpeed,
+        vx: dir * ROCK_SPEED,
         vy: -40,
         owner: pl.id,
         alive: true,
@@ -433,7 +392,6 @@ function stepMatch(m, dt) {
     }
   }
 
-  // integrate players
   for (const side of ["left", "right"]) {
     const pl = m.players[side];
 
@@ -441,11 +399,9 @@ function stepMatch(m, dt) {
     pl.y += pl.vy * dt;
     pl.vy += gravity * dt;
 
-    // bounds (각자 반쪽)
     if (side === "left") pl.x = clamp(pl.x, 40, m.W / 2 - 40);
     else pl.x = clamp(pl.x, m.W / 2 + 40, m.W - 40);
 
-    // ground
     if (pl.y >= m.groundY) {
       pl.y = m.groundY;
       pl.vy = 0;
@@ -453,7 +409,9 @@ function stepMatch(m, dt) {
     }
   }
 
-  // integrate rocks & collisions
+  const left = m.players.left;
+  const right = m.players.right;
+
   for (const rock of m.rocks) {
     if (!rock.alive) continue;
 
@@ -461,13 +419,11 @@ function stepMatch(m, dt) {
     rock.y += rock.vy * dt;
     rock.vy += gravity * 0.35 * dt;
 
-    // out
     if (rock.x < -100 || rock.x > m.W + 100 || rock.y > m.H + 200) {
       rock.alive = false;
       continue;
     }
 
-    // hit players
     for (const side of ["left", "right"]) {
       const pl = m.players[side];
       if (pl.id === rock.owner) continue;
@@ -479,45 +435,40 @@ function stepMatch(m, dt) {
         rock.alive = false;
         pl.hp -= 1;
 
-        // knockback
         pl.vy = -220;
         pl.x += (rock.vx > 0 ? 1 : -1) * 18;
 
         io.to(m.room).emit("sfx_hit", { target: pl.id, owner: rock.owner });
 
-        // 라운드 승/패 판정
-        if (pl.hp <= 0) {
-          const roundWinnerSide = (pl.id === left.id) ? "right" : "left";
+        if (pl.hp <= 0 && !m.over) {
+          const roundWinnerSide = pl.id === left.id ? "right" : "left";
           m.score[roundWinnerSide] += 1;
 
           io.to(m.room).emit("round_over", {
+            winnerSide: roundWinnerSide,
+            score: { ...m.score },
             round: m.round,
-            roundWinnerId: roundWinnerSide === "left" ? left.id : right.id,
-            score: m.score,
           });
 
-          // 경기 종료?
-          const winRounds = RULES.winRounds;
-          if (m.score.left >= winRounds || m.score.right >= winRounds || m.round >= RULES.maxRounds) {
-            const winnerId = (m.score.left > m.score.right) ? left.id : right.id;
-            endMatch(m, winnerId);
-            return;
+          if (m.score.left >= WIN_ROUNDS || m.score.right >= WIN_ROUNDS) {
+            m.over = true;
+            m.winnerId = m.score.left >= WIN_ROUNDS ? left.id : right.id;
+          } else {
+            m.round += 1;
+            resetRound(m);
           }
-
-          // 다음 라운드 준비
-          m.round += 1;
-          m.roundOver = true;
-          m.roundEndsAt = nowMs() + Math.floor(RULES.betweenRoundsSec * 1000);
-          return;
         }
       }
     }
   }
 
   m.rocks = m.rocks.filter((r) => r.alive);
+
+  if (m.over) {
+    finalizeMatch(m.room, m.winnerId, "normal");
+  }
 }
 
-// tick
 let lastTick = nowMs();
 setInterval(() => {
   const t = nowMs();
@@ -527,8 +478,6 @@ setInterval(() => {
   for (const m of MATCHES.values()) {
     if (!m.over) stepMatch(m, dt);
 
-    if (!MATCHES.has(m.room)) continue; // endMatch로 삭제됐을 수 있음
-
     io.to(m.room).emit("state", {
       t,
       W: m.W,
@@ -536,13 +485,14 @@ setInterval(() => {
       groundY: m.groundY,
       round: m.round,
       score: m.score,
+      rules: { MAX_ROUNDS, WIN_ROUNDS, HITS_TO_WIN_ROUND },
       players: m.players,
       rocks: m.rocks,
     });
   }
 }, 1000 / 30);
 
-// -------------------- Shop --------------------
+// -------------------- Shop catalog --------------------
 const SHOP = [
   { id: "default", name: "기본 바위", price: 0, color: "#9aa0a6", trail: 0.15 },
   { id: "ruby", name: "루비 바위", price: 120, color: "#ff4b4b", trail: 0.22 },
@@ -557,7 +507,6 @@ io.on("connection", (socket) => {
   socket.data.room = null;
   socket.data.playerId = null;
   socket.data.name = "Player";
-  socket.data.lastOfflineAwardAt = 0;
 
   socket.on("hello", (payload, cb) => {
     const p = ensurePlayer(payload?.profile);
@@ -571,31 +520,6 @@ io.on("connection", (socket) => {
       ok: true,
       profile: publicProfile(p),
       shop: SHOP,
-      leaderboard: DB.leaderboard,
-    });
-  });
-
-  // AI전/로컬도 서버에 저장되게 (P1(로그인한 계정)에게 지급)
-  socket.on("offline_award", ({ result }, cb) => {
-    const pid = socket.data.playerId;
-    if (!pid || !DB.players[pid]) return cb?.({ ok: false, error: "no_player" });
-
-    const r = (result === "win" || result === "lose") ? result : null;
-    if (!r) return cb?.({ ok: false, error: "bad_result" });
-
-    // 간단 악용 방지(너무 연속 지급 방지)
-    const now = nowMs();
-    if (now - (socket.data.lastOfflineAwardAt || 0) < 4000) {
-      return cb?.({ ok: false, error: "too_fast" });
-    }
-    socket.data.lastOfflineAwardAt = now;
-
-    awardAfterMatch(pid, r, false);
-    rebuildLeaderboard();
-
-    cb?.({
-      ok: true,
-      profile: publicProfile(DB.players[pid]),
       leaderboard: DB.leaderboard,
     });
   });
@@ -640,7 +564,9 @@ io.on("connection", (socket) => {
     const p = DB.players[pid];
     const level = xpToLevel(p.xp);
 
-    if (ranked && level < 15) return cb?.({ ok: false, error: "rank_locked", needLevel: 15 });
+    if (ranked && level < 15) {
+      return cb?.({ ok: false, error: "rank_locked", needLevel: 15 });
+    }
 
     removeFromQueue(casualQueue, socket.id);
     removeFromQueue(rankedQueue, socket.id);
@@ -672,19 +598,41 @@ io.on("connection", (socket) => {
     };
   });
 
+  // AI전 결과 서버 저장 (XP/루비)
+  socket.on("ai_result", ({ result }, cb) => {
+    const pid = socket.data.playerId;
+    if (!pid || !DB.players[pid]) return cb?.({ ok: false });
+
+    const r = result === "win" ? "win" : "lose";
+    awardAfterMatch(pid, r, false);
+    rebuildLeaderboard();
+
+    cb?.({
+      ok: true,
+      profile: publicProfile(DB.players[pid]),
+      leaderboard: DB.leaderboard,
+    });
+  });
+
+  // 나가면 즉시 기권패 처리 (남은 사람이 승리)
   socket.on("disconnect", () => {
     removeFromQueue(casualQueue, socket.id);
     removeFromQueue(rankedQueue, socket.id);
 
     const room = socket.data.room;
+    const leaverId = socket.data.playerId;
+
     if (room && MATCHES.has(room)) {
       const m = MATCHES.get(room);
       if (m && !m.over) {
         const leftId = m.players.left.id;
         const rightId = m.players.right.id;
-        const leaverId = socket.data.playerId;
         const winnerId = leaverId === leftId ? rightId : leftId;
-        endMatch(m, winnerId);
+
+        m.over = true;
+        m.winnerId = winnerId;
+
+        finalizeMatch(room, winnerId, "disconnect");
       }
     }
   });
@@ -694,4 +642,3 @@ server.listen(PORT, () => {
   console.log("Server running on port", PORT);
   console.log("DB_PATH =", DB_PATH);
 });
-
