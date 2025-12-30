@@ -14,10 +14,16 @@ const io = new Server(server, {
 
 app.use(express.static(path.join(__dirname, "public")));
 
-// -------------------- DB (local json) --------------------
-const DB_PATH = path.join(__dirname, "data", "db.json");
+// -------------------- Persistent DB path --------------------
+// Render에서 Disk mount path를 /var/data로 두면 이 경로 아래만 유지됨.
+const PERSIST_ROOT =
+  process.env.DATA_DIR ||
+  (fs.existsSync("/var/data") ? "/var/data" : path.join(__dirname, "data"));
+
+const DB_PATH = path.join(PERSIST_ROOT, "owl_rockfight", "db.json");
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
+// -------------------- DB (json) --------------------
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
     const init = { players: {}, leaderboard: [] };
@@ -33,16 +39,31 @@ function loadDB() {
 let DB = loadDB();
 let dirty = false;
 
-function saveDBSoon() {
-  dirty = true;
-}
-setInterval(() => {
-  if (!dirty) return;
-  dirty = false;
+function flushDB() {
   try {
     fs.writeFileSync(DB_PATH, JSON.stringify(DB, null, 2), "utf8");
   } catch {}
+}
+
+function saveDBSoon() {
+  dirty = true;
+}
+
+setInterval(() => {
+  if (!dirty) return;
+  dirty = false;
+  flushDB();
 }, 1200);
+
+// 종료/재시작 직전에 최대한 저장
+process.on("SIGTERM", () => {
+  flushDB();
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  flushDB();
+  process.exit(0);
+});
 
 // -------------------- helpers --------------------
 function clamp(n, a, b) {
@@ -58,8 +79,45 @@ function nowMs() {
   return Date.now();
 }
 
+// ---------- Tier (rating -> tier/div) ----------
+const TIERS = [
+  { name: "아이언",  min: 0 },
+  { name: "브론즈",  min: 900 },
+  { name: "실버",    min: 1100 },
+  { name: "골드",    min: 1300 },
+  { name: "플래티넘", min: 1500 },
+  { name: "다이아",  min: 1700 },
+  { name: "초월",    min: 1900 },
+  { name: "불멸",    min: 2100 },
+];
+
+function ratingToTier(rating) {
+  const r = Number(rating) || 0;
+  let tier = TIERS[0].name;
+  let tierMin = TIERS[0].min;
+  let nextMin = Infinity;
+
+  for (let i = 0; i < TIERS.length; i++) {
+    if (r >= TIERS[i].min) {
+      tier = TIERS[i].name;
+      tierMin = TIERS[i].min;
+      nextMin = (i + 1 < TIERS.length) ? TIERS[i + 1].min : Infinity;
+    }
+  }
+
+  // division: 3~1 (상위로 갈수록 1)
+  // 각 티어 구간을 3등분 (불멸은 division 없음)
+  let division = null;
+  if (nextMin !== Infinity) {
+    const span = Math.max(1, nextMin - tierMin);
+    const pos = clamp((r - tierMin) / span, 0, 0.999999);
+    const idx = Math.floor(pos * 3); // 0,1,2
+    division = 3 - idx; // 3,2,1
+  }
+  return { tier, division };
+}
+
 function ensurePlayer(profile) {
-  // profile: { id, name }
   const id = String(profile?.id || "");
   const name = String(profile?.name || "Player").slice(0, 16) || "Player";
   if (!id) return null;
@@ -91,6 +149,7 @@ function ensurePlayer(profile) {
 }
 
 function publicProfile(p) {
+  const { tier, division } = ratingToTier(p.rating);
   return {
     id: p.id,
     name: p.name,
@@ -100,26 +159,32 @@ function publicProfile(p) {
     rockSkin: p.rockSkin,
     ownedSkins: p.ownedSkins,
     rating: p.rating,
+    tier,
+    division, // 불멸이면 null
     wins: p.wins,
     losses: p.losses,
   };
 }
 
 function rebuildLeaderboard() {
-  const arr = Object.values(DB.players).map((p) => ({
-    id: p.id,
-    name: p.name,
-    rating: p.rating,
-    wins: p.wins,
-    losses: p.losses,
-    level: xpToLevel(p.xp),
-  }));
+  const arr = Object.values(DB.players).map((p) => {
+    const t = ratingToTier(p.rating);
+    return {
+      id: p.id,
+      name: p.name,
+      rating: p.rating,
+      tier: t.tier,
+      division: t.division,
+      wins: p.wins,
+      losses: p.losses,
+      level: xpToLevel(p.xp),
+    };
+  });
   arr.sort((a, b) => b.rating - a.rating);
   DB.leaderboard = arr.slice(0, 100);
 }
 
 function awardAfterMatch(playerId, result, ranked) {
-  // result: "win" | "lose"
   const p = DB.players[playerId];
   if (!p) return;
 
@@ -143,10 +208,9 @@ function awardAfterMatch(playerId, result, ranked) {
 }
 
 function updateRating(pA, pB, winnerId) {
-  // 간단 ELO
   const K = 28;
-  const Ra = pA.rating,
-    Rb = pB.rating;
+  const Ra = pA.rating;
+  const Rb = pB.rating;
 
   const Ea = 1 / (1 + Math.pow(10, (Rb - Ra) / 400));
   const Eb = 1 / (1 + Math.pow(10, (Ra - Rb) / 400));
@@ -178,52 +242,67 @@ function removeFromQueue(queue, socketId) {
   if (idx >= 0) queue.splice(idx, 1);
 }
 
-// -------------------- In-match simulation (server-authoritative) --------------------
+// -------------------- In-match simulation (server authoritative) --------------------
 const MATCHES = new Map();
 
+// 룰: 5번 맞추면 라운드 승, 최대 7라운드(4선승), 공속(발사쿨) 살짝 느리게
+const RULES = {
+  hitsToWinRound: 5,
+  maxRounds: 7,
+  winRounds: 4,          // best of 7
+  shootCooldown: 0.65,   // 원래 0.55 -> 살짝 느리게
+  betweenRoundsSec: 1.2,
+};
+
 function createMatchState(room, pLeft, pRight, ranked) {
-  const W = 900,
-    H = 450;
+  const W = 900, H = 450;
   const groundY = 360;
 
   return {
     room,
     ranked,
-    W,
-    H,
-    groundY,
+    W, H, groundY,
     startAt: nowMs(),
     over: false,
     winnerId: null,
 
+    round: 1,
+    score: { left: 0, right: 0 },
+    roundOver: false,
+    roundEndsAt: 0,
+
     players: {
-      left: {
-        id: pLeft,
-        x: 120,
-        y: groundY,
-        vx: 0,
-        vy: 0,
-        onGround: true,
-        hp: 3,
-        cooldown: 0,
-      },
-      right: {
-        id: pRight,
-        x: W - 120,
-        y: groundY,
-        vx: 0,
-        vy: 0,
-        onGround: true,
-        hp: 3,
-        cooldown: 0,
-      },
+      left: { id: pLeft,  x: 120,     y: groundY, vx: 0, vy: 0, onGround: true, hp: RULES.hitsToWinRound, cooldown: 0 },
+      right:{ id: pRight, x: W - 120, y: groundY, vx: 0, vy: 0, onGround: true, hp: RULES.hitsToWinRound, cooldown: 0 },
     },
     rocks: [],
     inputs: {
-      [pLeft]: { l: false, r: false, j: false, shoot: false },
+      [pLeft]:  { l: false, r: false, j: false, shoot: false },
       [pRight]: { l: false, r: false, j: false, shoot: false },
     },
   };
+}
+
+function resetRound(m) {
+  m.rocks = [];
+  m.players.left.x = 120;
+  m.players.left.y = m.groundY;
+  m.players.left.vx = 0;
+  m.players.left.vy = 0;
+  m.players.left.onGround = true;
+  m.players.left.hp = RULES.hitsToWinRound;
+  m.players.left.cooldown = 0;
+
+  m.players.right.x = m.W - 120;
+  m.players.right.y = m.groundY;
+  m.players.right.vx = 0;
+  m.players.right.vy = 0;
+  m.players.right.onGround = true;
+  m.players.right.hp = RULES.hitsToWinRound;
+  m.players.right.cooldown = 0;
+
+  m.roundOver = false;
+  m.roundEndsAt = 0;
 }
 
 function tryMatch(queue, ranked) {
@@ -250,6 +329,7 @@ function tryMatch(queue, ranked) {
     io.to(room).emit("match_start", {
       room,
       ranked,
+      rules: RULES,
       players: [
         { playerId: a.playerId, name: a.name, side: "left" },
         { playerId: b.playerId, name: b.name, side: "right" },
@@ -258,17 +338,61 @@ function tryMatch(queue, ranked) {
   }
 }
 
+function endMatch(m, winnerId) {
+  const left = m.players.left;
+  const right = m.players.right;
+
+  m.over = true;
+  m.winnerId = winnerId;
+
+  const loserId = winnerId === left.id ? right.id : left.id;
+  const pW = DB.players[winnerId];
+  const pL = DB.players[loserId];
+
+  if (m.ranked && pW && pL) updateRating(pW, pL, winnerId);
+
+  awardAfterMatch(winnerId, "win", m.ranked);
+  awardAfterMatch(loserId, "lose", m.ranked);
+
+  rebuildLeaderboard();
+
+  io.to(m.room).emit("match_over", {
+    winnerId,
+    ranked: m.ranked,
+    score: m.score,
+    roundsPlayed: m.round,
+    profiles: {
+      [winnerId]: pW ? publicProfile(pW) : null,
+      [loserId]: pL ? publicProfile(pL) : null,
+    },
+    leaderboard: DB.leaderboard,
+  });
+
+  MATCHES.delete(m.room);
+}
+
 function stepMatch(m, dt) {
   const speed = 320;
   const jumpV = -520;
   const gravity = 1400;
   const rockSpeed = 680;
 
-  const hitboxW = 46,
-    hitboxH = 62;
-
+  const hitboxW = 46, hitboxH = 62;
   function rectHit(px, py, rx, ry, rw, rh) {
     return px >= rx && px <= rx + rw && py >= ry && py <= ry + rh;
+  }
+
+  // 라운드 종료 대기중이면 다음 라운드로 넘기기
+  if (m.roundOver) {
+    if (nowMs() >= m.roundEndsAt) {
+      // 다음 라운드 or 경기 종료는 이미 결정됨
+      resetRound(m);
+      io.to(m.room).emit("round_start", {
+        round: m.round,
+        score: m.score,
+      });
+    }
+    return;
   }
 
   const left = m.players.left;
@@ -292,7 +416,7 @@ function stepMatch(m, dt) {
     pl.cooldown = Math.max(0, pl.cooldown - dt);
 
     if (input.shoot && pl.cooldown <= 0) {
-      pl.cooldown = 0.55;
+      pl.cooldown = RULES.shootCooldown;
 
       const dir = side === "left" ? 1 : -1;
       m.rocks.push({
@@ -337,7 +461,7 @@ function stepMatch(m, dt) {
     rock.y += rock.vy * dt;
     rock.vy += gravity * 0.35 * dt;
 
-    // out of bounds
+    // out
     if (rock.x < -100 || rock.x > m.W + 100 || rock.y > m.H + 200) {
       rock.alive = false;
       continue;
@@ -361,47 +485,39 @@ function stepMatch(m, dt) {
 
         io.to(m.room).emit("sfx_hit", { target: pl.id, owner: rock.owner });
 
-        if (pl.hp <= 0 && !m.over) {
-          m.over = true;
-          m.winnerId = pl.id === left.id ? right.id : left.id;
+        // 라운드 승/패 판정
+        if (pl.hp <= 0) {
+          const roundWinnerSide = (pl.id === left.id) ? "right" : "left";
+          m.score[roundWinnerSide] += 1;
+
+          io.to(m.room).emit("round_over", {
+            round: m.round,
+            roundWinnerId: roundWinnerSide === "left" ? left.id : right.id,
+            score: m.score,
+          });
+
+          // 경기 종료?
+          const winRounds = RULES.winRounds;
+          if (m.score.left >= winRounds || m.score.right >= winRounds || m.round >= RULES.maxRounds) {
+            const winnerId = (m.score.left > m.score.right) ? left.id : right.id;
+            endMatch(m, winnerId);
+            return;
+          }
+
+          // 다음 라운드 준비
+          m.round += 1;
+          m.roundOver = true;
+          m.roundEndsAt = nowMs() + Math.floor(RULES.betweenRoundsSec * 1000);
+          return;
         }
       }
     }
   }
 
   m.rocks = m.rocks.filter((r) => r.alive);
-
-  // end match
-  if (m.over) {
-    const room = m.room;
-    const winnerId = m.winnerId;
-    const loserId = winnerId === left.id ? right.id : left.id;
-
-    const pW = DB.players[winnerId];
-    const pL = DB.players[loserId];
-
-    if (m.ranked && pW && pL) updateRating(pW, pL, winnerId);
-
-    awardAfterMatch(winnerId, "win", m.ranked);
-    awardAfterMatch(loserId, "lose", m.ranked);
-
-    rebuildLeaderboard();
-
-    io.to(room).emit("match_over", {
-      winnerId,
-      ranked: m.ranked,
-      profiles: {
-        [winnerId]: pW ? publicProfile(pW) : null,
-        [loserId]: pL ? publicProfile(pL) : null,
-      },
-      leaderboard: DB.leaderboard,
-    });
-
-    MATCHES.delete(room);
-  }
 }
 
-// tick loop
+// tick
 let lastTick = nowMs();
 setInterval(() => {
   const t = nowMs();
@@ -411,18 +527,22 @@ setInterval(() => {
   for (const m of MATCHES.values()) {
     if (!m.over) stepMatch(m, dt);
 
+    if (!MATCHES.has(m.room)) continue; // endMatch로 삭제됐을 수 있음
+
     io.to(m.room).emit("state", {
       t,
       W: m.W,
       H: m.H,
       groundY: m.groundY,
+      round: m.round,
+      score: m.score,
       players: m.players,
       rocks: m.rocks,
     });
   }
 }, 1000 / 30);
 
-// -------------------- Shop catalog --------------------
+// -------------------- Shop --------------------
 const SHOP = [
   { id: "default", name: "기본 바위", price: 0, color: "#9aa0a6", trail: 0.15 },
   { id: "ruby", name: "루비 바위", price: 120, color: "#ff4b4b", trail: 0.22 },
@@ -437,6 +557,7 @@ io.on("connection", (socket) => {
   socket.data.room = null;
   socket.data.playerId = null;
   socket.data.name = "Player";
+  socket.data.lastOfflineAwardAt = 0;
 
   socket.on("hello", (payload, cb) => {
     const p = ensurePlayer(payload?.profile);
@@ -454,6 +575,31 @@ io.on("connection", (socket) => {
     });
   });
 
+  // AI전/로컬도 서버에 저장되게 (P1(로그인한 계정)에게 지급)
+  socket.on("offline_award", ({ result }, cb) => {
+    const pid = socket.data.playerId;
+    if (!pid || !DB.players[pid]) return cb?.({ ok: false, error: "no_player" });
+
+    const r = (result === "win" || result === "lose") ? result : null;
+    if (!r) return cb?.({ ok: false, error: "bad_result" });
+
+    // 간단 악용 방지(너무 연속 지급 방지)
+    const now = nowMs();
+    if (now - (socket.data.lastOfflineAwardAt || 0) < 4000) {
+      return cb?.({ ok: false, error: "too_fast" });
+    }
+    socket.data.lastOfflineAwardAt = now;
+
+    awardAfterMatch(pid, r, false);
+    rebuildLeaderboard();
+
+    cb?.({
+      ok: true,
+      profile: publicProfile(DB.players[pid]),
+      leaderboard: DB.leaderboard,
+    });
+  });
+
   socket.on("shop_buy", (skinId, cb) => {
     const pid = socket.data.playerId;
     if (!pid || !DB.players[pid]) return cb?.({ ok: false });
@@ -462,9 +608,7 @@ io.on("connection", (socket) => {
     const item = SHOP.find((s) => s.id === skinId);
     if (!item) return cb?.({ ok: false, error: "no_item" });
 
-    if (p.ownedSkins.includes(skinId)) {
-      return cb?.({ ok: true, profile: publicProfile(p) });
-    }
+    if (p.ownedSkins.includes(skinId)) return cb?.({ ok: true, profile: publicProfile(p) });
     if (p.rubies < item.price) return cb?.({ ok: false, error: "no_rubies" });
 
     p.rubies -= item.price;
@@ -496,9 +640,7 @@ io.on("connection", (socket) => {
     const p = DB.players[pid];
     const level = xpToLevel(p.xp);
 
-    if (ranked && level < 15) {
-      return cb?.({ ok: false, error: "rank_locked", needLevel: 15 });
-    }
+    if (ranked && level < 15) return cb?.({ ok: false, error: "rank_locked", needLevel: 15 });
 
     removeFromQueue(casualQueue, socket.id);
     removeFromQueue(rankedQueue, socket.id);
@@ -522,13 +664,12 @@ io.on("connection", (socket) => {
     const m = MATCHES.get(room);
     if (!m) return;
 
-    const safe = {
+    m.inputs[pid] = {
       l: !!input?.l,
       r: !!input?.r,
       j: !!input?.j,
       shoot: !!input?.shoot,
     };
-    m.inputs[pid] = safe;
   });
 
   socket.on("disconnect", () => {
@@ -539,11 +680,11 @@ io.on("connection", (socket) => {
     if (room && MATCHES.has(room)) {
       const m = MATCHES.get(room);
       if (m && !m.over) {
-        m.over = true;
         const leftId = m.players.left.id;
         const rightId = m.players.right.id;
         const leaverId = socket.data.playerId;
-        m.winnerId = leaverId === leftId ? rightId : leftId;
+        const winnerId = leaverId === leftId ? rightId : leftId;
+        endMatch(m, winnerId);
       }
     }
   });
@@ -551,4 +692,5 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
   console.log("Server running on port", PORT);
+  console.log("DB_PATH =", DB_PATH);
 });
