@@ -53,6 +53,13 @@ function savedName() {
 
 nameInput.value = savedName();
 
+function tierText(p) {
+  if (!p) return "";
+  if (!p.tier) return "";
+  if (p.division == null) return `${p.tier}`; // 불멸 등
+  return `${p.tier} ${p.division}`;
+}
+
 function updateTopBar() {
   if (!profile) {
     statsBar.textContent = "연결 중...";
@@ -61,7 +68,7 @@ function updateTopBar() {
   }
   const lvl = profile.level;
   statsBar.textContent =
-    `Lv.${lvl} | XP ${profile.xp} | 루비 ${profile.rubies} | 레이팅 ${profile.rating} (W:${profile.wins} L:${profile.losses})`;
+    `Lv.${lvl} | XP ${profile.xp} | 루비 ${profile.rubies} | 티어 ${tierText(profile)} | 레이팅 ${profile.rating} (W:${profile.wins} L:${profile.losses})`;
 
   btnRanked.textContent = (lvl >= 15)
     ? "랭크전 플레이 하기"
@@ -145,7 +152,7 @@ function renderLeaderboard() {
     row.className = "entry";
     row.innerHTML = `
       <div><b>#${i + 1}</b> ${escapeHtml(p.name)} <span class="muted tiny">(Lv.${p.level})</span></div>
-      <div><b>${p.rating}</b> <span class="muted tiny">W:${p.wins} L:${p.losses}</span></div>
+      <div><b>${p.rating}</b> <span class="muted tiny">${p.tier}${p.division ? " " + p.division : ""} | W:${p.wins} L:${p.losses}</span></div>
     `;
     wrap.appendChild(row);
   });
@@ -273,7 +280,6 @@ function playHit() {
   o.start(); o.stop(ac.currentTime + 0.14);
 }
 function playImpact() {
-  // 짧은 클릭/임팩트
   const ac = getAudio();
   const bufferSize = 0.06 * ac.sampleRate;
   const buffer = ac.createBuffer(1, bufferSize, ac.sampleRate);
@@ -289,7 +295,6 @@ function playImpact() {
   src.start();
 }
 
-// 서버 이벤트 사운드
 socket.on("sfx_shoot", () => { playWhoosh(); playImpact(); });
 socket.on("sfx_hit", () => { playHit(); });
 
@@ -304,18 +309,14 @@ function drawGround(W, H, groundY) {
   ctx.fillStyle = "rgba(255,255,255,0.04)";
   ctx.fillRect(0, groundY, W, H - groundY);
 
-  // center line
   ctx.fillStyle = "rgba(91,214,255,0.08)";
   ctx.fillRect(W/2 - 2, 0, 4, H);
-
   ctx.restore();
 }
 
-function drawOwl(x, y, side, hp) {
-  // 간단 부엉이 스타일 (머리+몸)
+function drawOwl(x, y, side, hp, maxHp=5) {
   ctx.save();
 
-  // shadow
   ctx.globalAlpha = 0.22;
   ctx.beginPath();
   ctx.ellipse(x, y + 6, 28, 10, 0, 0, Math.PI*2);
@@ -323,22 +324,18 @@ function drawOwl(x, y, side, hp) {
   ctx.fill();
   ctx.globalAlpha = 1;
 
-  // body
   ctx.fillStyle = side === "left" ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.82)";
   roundRect(x - 24, y - 56, 48, 56, 14);
   ctx.fill();
 
-  // head
   ctx.fillStyle = "rgba(255,255,255,0.95)";
   roundRect(x - 26, y - 92, 52, 44, 16);
   ctx.fill();
 
-  // eyes
   ctx.fillStyle = "#0b0f14";
   ctx.beginPath(); ctx.arc(x - 10, y - 74, 5, 0, Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(x + 10, y - 74, 5, 0, Math.PI*2); ctx.fill();
 
-  // beak
   ctx.fillStyle = "rgba(255,211,75,0.95)";
   ctx.beginPath();
   ctx.moveTo(x, y - 66);
@@ -347,11 +344,11 @@ function drawOwl(x, y, side, hp) {
   ctx.closePath();
   ctx.fill();
 
-  // HP
+  // HP bar
   ctx.fillStyle = "rgba(255,255,255,0.15)";
   roundRect(x - 30, y - 112, 60, 8, 6); ctx.fill();
   ctx.fillStyle = "rgba(91,214,255,0.85)";
-  roundRect(x - 30, y - 112, (60 * clamp(hp/3, 0, 1)), 8, 6); ctx.fill();
+  roundRect(x - 30, y - 112, (60 * clamp(hp/maxHp, 0, 1)), 8, 6); ctx.fill();
 
   ctx.restore();
 }
@@ -411,41 +408,6 @@ function startVsAI() {
   startOfflineSim({ ai:true });
 }
 
-// offline sim state
-function startOfflineSim({ ai }) {
-  running = true;
-
-  const W = canvas.width, H = canvas.height, groundY = 360;
-  const state = {
-    W, H, groundY,
-    left: { x:120, y:groundY, vx:0, vy:0, onGround:true, hp:3, cd:0 },
-    right:{ x:W-120,y:groundY, vx:0, vy:0, onGround:true, hp:3, cd:0 },
-    rocks: [],
-    shake: 0,
-    mySkin: profile?.rockSkin || "default",
-    skinMap: makeSkinMap()
-  };
-
-  const keys = {};
-  window.onkeydown = (e) => { keys[e.key.toLowerCase()] = true; if (e.key === "Enter") keys["enter"]=true; resumeAudio(); };
-  window.onkeyup = (e) => { keys[e.key.toLowerCase()] = false; if (e.key === "Enter") keys["enter"]=false; };
-
-  function resumeAudio(){ try{ getAudio().resume(); }catch{} }
-
-  let last = performance.now();
-  function loop(t) {
-    if (!running || mode === "online") return;
-    const dt = clamp((t - last) / 1000, 0, 0.05);
-    last = t;
-
-    stepOffline(state, keys, dt, ai);
-    renderOffline(state);
-
-    requestAnimationFrame(loop);
-  }
-  requestAnimationFrame(loop);
-}
-
 function makeSkinMap() {
   const map = {};
   for (const s of shop) map[s.id] = s;
@@ -457,10 +419,74 @@ function skinColor(id) {
   return item?.color || "#9aa0a6";
 }
 
-function stepOffline(s, keys, dt, ai) {
-  const speed = 320, jumpV = -520, gravity = 1400, rockSpeed = 680;
+// offline sim state
+function startOfflineSim({ ai }) {
+  running = true;
 
-  // inputs
+  const W = canvas.width, H = canvas.height, groundY = 360;
+  const RULES = { hitsToWinRound: 5, maxRounds: 7, winRounds: 4, shootCooldown: 0.65 };
+
+  const state = {
+    W, H, groundY,
+    rules: RULES,
+    round: 1,
+    score: { left: 0, right: 0 },
+
+    left:  { x:120, y:groundY, vx:0, vy:0, onGround:true, hp:RULES.hitsToWinRound, cd:0 },
+    right: { x:W-120,y:groundY, vx:0, vy:0, onGround:true, hp:RULES.hitsToWinRound, cd:0 },
+    rocks: [],
+    shake: 0,
+
+    ai,
+  };
+
+  const keys = {};
+  window.onkeydown = (e) => {
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === "Enter") keys["enter"]=true;
+    resumeAudio();
+  };
+  window.onkeyup = (e) => {
+    keys[e.key.toLowerCase()] = false;
+    if (e.key === "Enter") keys["enter"]=false;
+  };
+
+  function resumeAudio(){ try{ getAudio().resume(); }catch{} }
+
+  let last = performance.now();
+  function loop(t) {
+    if (!running || mode === "online") return;
+    const dt = clamp((t - last) / 1000, 0, 0.05);
+    last = t;
+
+    stepOffline(state, keys, dt);
+    renderOffline(state);
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+
+function resetOfflineRound(s) {
+  s.rocks = [];
+  s.left.x = 120; s.left.y = s.groundY; s.left.vx = 0; s.left.vy = 0; s.left.onGround = true; s.left.hp = s.rules.hitsToWinRound; s.left.cd=0;
+  s.right.x = s.W-120; s.right.y = s.groundY; s.right.vx = 0; s.right.vy = 0; s.right.onGround = true; s.right.hp = s.rules.hitsToWinRound; s.right.cd=0;
+}
+
+function awardOfflineToServer(result) {
+  if (!profile) return;
+  socket.emit("offline_award", { result }, (res) => {
+    if (!res?.ok) return;
+    profile = res.profile;
+    leaderboard = res.leaderboard || leaderboard;
+    updateTopBar();
+    updateRankLockMsg();
+  });
+}
+
+function stepOffline(s, keys, dt) {
+  const speed = 320, jumpV = -520, gravity = 1400;
+
   // P1
   const p1L = !!keys["a"];
   const p1R = !!keys["d"];
@@ -473,28 +499,23 @@ function stepOffline(s, keys, dt, ai) {
   const p2J = !!keys["arrowup"];
   const p2S = !!keys["enter"];
 
-  // AI (오른쪽 부엉이)
+  // AI (오른쪽)
   let aiL=false, aiR=false, aiJ=false, aiS=false;
-  if (ai) {
+  if (s.ai) {
     const targetX = s.left.x;
     if (s.right.x > targetX + 30) aiL = true;
     if (s.right.x < targetX - 30) aiR = true;
-    // 랜덤 점프 회피
     if (Math.random() < 0.01 && s.right.onGround) aiJ = true;
-    // 쿨마다 발사
     if (s.right.cd <= 0 && Math.abs(s.right.x - targetX) < 240) aiS = true;
   }
 
-  // update players
   updatePlayer(s.left, dt, gravity, jumpV, speed, p1L, p1R, p1J, p1S, +1, s);
-  if (ai) updatePlayer(s.right, dt, gravity, jumpV, speed, aiL, aiR, aiJ, aiS, -1, s);
+  if (s.ai) updatePlayer(s.right, dt, gravity, jumpV, speed, aiL, aiR, aiJ, aiS, -1, s);
   else updatePlayer(s.right, dt, gravity, jumpV, speed, p2L, p2R, p2J, p2S, -1, s);
 
-  // bounds
   s.left.x = clamp(s.left.x, 40, s.W/2 - 40);
   s.right.x = clamp(s.right.x, s.W/2 + 40, s.W - 40);
 
-  // rocks
   for (const r of s.rocks) {
     if (!r.alive) continue;
     r.x += r.vx * dt;
@@ -503,7 +524,6 @@ function stepOffline(s, keys, dt, ai) {
 
     if (r.x < -100 || r.x > s.W + 100 || r.y > s.H + 200) r.alive = false;
 
-    // collide
     if (r.alive && r.owner === "left") {
       if (hitPlayer(r, s.right)) {
         r.alive = false; s.right.hp -= 1;
@@ -522,16 +542,30 @@ function stepOffline(s, keys, dt, ai) {
   }
   s.rocks = s.rocks.filter(r => r.alive);
 
-  // end
+  // 라운드 종료 체크
   if (s.left.hp <= 0 || s.right.hp <= 0) {
-    const win = s.right.hp <= 0 ? "P1 승리!" : "P2/AI 승리!";
-    setMatchMsg(win + " (로비로 나가서 다시 시작 가능)");
-    // 오프라인도 보상 조금
-    if (profile) {
-      // 단순 로컬 보상: 서버 저장은 “온라인 매치”만 확실함. (원하면 오프라인도 서버로 지급 가능)
-      // 여기서는 UX로만 표시
+    const roundWinner = (s.right.hp <= 0) ? "left" : "right";
+    s.score[roundWinner] += 1;
+
+    // 4선승 or 7라운드 종료
+    const done = (s.score.left >= s.rules.winRounds || s.score.right >= s.rules.winRounds || s.round >= s.rules.maxRounds);
+
+    if (done) {
+      const finalWinner = (s.score.left > s.score.right) ? "left" : "right";
+      const winText = (finalWinner === "left") ? "P1 최종 승리!" : (s.ai ? "AI 최종 승리!" : "P2 최종 승리!");
+      setMatchMsg(winText + " (로비로 나가서 다시 시작 가능)");
+
+      // ★ 오프라인도 XP/루비 저장: 로그인한 계정(P1) 기준
+      if (finalWinner === "left") awardOfflineToServer("win");
+      else awardOfflineToServer("lose");
+
+      running = false;
+      return;
     }
-    running = false;
+
+    // 다음 라운드
+    s.round += 1;
+    resetOfflineRound(s);
   }
 }
 
@@ -550,7 +584,7 @@ function updatePlayer(p, dt, gravity, jumpV, speed, L, R, J, S, dir, s) {
   p.cd = Math.max(0, p.cd - dt);
 
   if (S && p.cd <= 0) {
-    p.cd = 0.55;
+    p.cd = s.rules.shootCooldown; // 공속 살짝 느리게
     s.rocks.push({
       x: p.x + dir * 34,
       y: p.y - 40,
@@ -584,7 +618,6 @@ function hitPlayer(r, p) {
 function renderOffline(s) {
   clear();
 
-  // shake
   if (s.shake > 0) {
     s.shake = Math.max(0, s.shake - 0.02);
     const amt = s.shake * 14;
@@ -594,17 +627,16 @@ function renderOffline(s) {
 
   drawGround(s.W, s.H, s.groundY);
 
-  // rocks
   const myColor = skinColor(profile?.rockSkin || "default");
   const enemyColor = "#9aa0a6";
   for (const r of s.rocks) drawRock(r, r.owner==="left" ? myColor : enemyColor);
 
-  drawOwl(s.left.x, s.left.y, "left", s.left.hp);
-  drawOwl(s.right.x, s.right.y, "right", s.right.hp);
+  drawOwl(s.left.x, s.left.y, "left", s.left.hp, s.rules.hitsToWinRound);
+  drawOwl(s.right.x, s.right.y, "right", s.right.hp, s.rules.hitsToWinRound);
 
-  hudLeft.textContent = `P1 HP: ${s.left.hp}`;
-  hudRight.textContent = `P2 HP: ${s.right.hp}`;
-  hudMid.textContent = mode === "ai" ? "AI전" : "로컬 2P";
+  hudLeft.textContent = `P1 HP: ${s.left.hp} | 라운드승: ${s.score.left}`;
+  hudRight.textContent = `${s.ai ? "AI" : "P2"} HP: ${s.right.hp} | 라운드승: ${s.score.right}`;
+  hudMid.textContent = `${s.ai ? "AI전" : "로컬 2P"} | Round ${s.round}/${s.rules.maxRounds}`;
 
   if (s.shake > 0) ctx.restore();
 }
@@ -621,11 +653,9 @@ function startOnlineShell(ranked) {
   online.room = null;
   online.myId = profile?.id;
 
-  // local controls for online (A/D/W + R)
   const keys = {};
-  window.onkeydown = (e) => { keys[e.key.toLowerCase()] = true; if (e.key==="Enter") keys["enter"]=true; resumeAudio(); };
+  window.onkeydown = (e) => { keys[e.key.toLowerCase()] = true; resumeAudio(); if (e.key==="Enter") keys["enter"]=true; };
   window.onkeyup = (e) => { keys[e.key.toLowerCase()] = false; if (e.key==="Enter") keys["enter"]=false; };
-
   function resumeAudio(){ try{ getAudio().resume(); }catch{} }
 
   let last = performance.now();
@@ -634,7 +664,6 @@ function startOnlineShell(ranked) {
     const dt = clamp((t - last) / 1000, 0, 0.05);
     last = t;
 
-    // send inputs at ~20hz
     sendInputTimer += dt;
     if (sendInputTimer >= 0.05) {
       sendInputTimer = 0;
@@ -663,7 +692,17 @@ socket.on("match_start", (data) => {
   const opp = data.players.find(p => p.playerId !== online.myId);
   online.opponentName = opp?.name || "Opponent";
 
-  setMatchMsg((online.ranked ? "랭크전" : "일반전") + ` 시작! 상대: ${online.opponentName}`);
+  setMatchMsg((online.ranked ? "랭크전" : "일반전") + ` 시작! 상대: ${online.opponentName} | 5히트=라운드승, 7라운드(4선승)`);
+});
+
+socket.on("round_over", (data) => {
+  // 라운드 결과는 UI에 살짝만 표시
+  const s = data?.score;
+  if (s) setMatchMsg(`라운드 종료! (내전적 표시) | ${s.left}:${s.right} | 다음 라운드 준비...`);
+});
+
+socket.on("round_start", (data) => {
+  setMatchMsg(`Round ${data.round} 시작! 스코어 ${data.score.left}:${data.score.right}`);
 });
 
 socket.on("state", (s) => {
@@ -672,9 +711,10 @@ socket.on("state", (s) => {
 
 socket.on("match_over", (data) => {
   const win = data.winnerId === online.myId;
-  setMatchMsg(win ? "승리! 보상 획득 🎉" : "패배... 다음판 가자");
 
-  // 서버에서 최신 프로필 다시 받기
+  // ★ 요청: 글로벌(온라인)일 때만 승/패 문구
+  setMatchMsg(win ? "승리 하였습니다! 🎉" : "패배 하였습니다.. 😢");
+
   const my = data.profiles?.[online.myId];
   if (my) profile = my;
   leaderboard = data.leaderboard || leaderboard;
@@ -699,25 +739,23 @@ function renderOnline() {
 
   drawGround(s.W, s.H, s.groundY);
 
-  // players mapping
   const left = s.players.left;
   const right = s.players.right;
 
   const myColor = skinColor(profile?.rockSkin || "default");
   for (const r of s.rocks) {
-    // 내 바위면 내 스킨색
     const col = (r.owner === online.myId) ? myColor : "#9aa0a6";
     drawRock(r, col);
   }
 
-  drawOwl(left.x, left.y, "left", left.hp);
-  drawOwl(right.x, right.y, "right", right.hp);
+  drawOwl(left.x, left.y, "left", left.hp, 5);
+  drawOwl(right.x, right.y, "right", right.hp, 5);
 
   const myIsLeft = left.id === online.myId;
   const myHP = myIsLeft ? left.hp : right.hp;
   const opHP = myIsLeft ? right.hp : left.hp;
 
-  hudLeft.textContent = `내 HP: ${myHP}`;
+  hudLeft.textContent = `내 HP: ${myHP} | 스코어 ${s.score?.left ?? 0}:${s.score?.right ?? 0} | Round ${s.round ?? 1}/7`;
   hudRight.textContent = `${online.opponentName} HP: ${opHP}`;
   hudMid.textContent = online.ranked ? "온라인 랭크" : "온라인 일반";
 }
