@@ -87,8 +87,8 @@ const TIERS = [
   { name: "골드",    min: 1300 },
   { name: "플래티넘", min: 1500 },
   { name: "다이아",  min: 1700 },
-  { name: "초월",    min: 1900 },
-  { name: "불멸",    min: 2100 },
+  { name: "마스터",    min: 1900 },
+  { name: "챌린저",    min: 2100 },
 ];
 
 function ratingToTier(rating) {
@@ -248,9 +248,9 @@ const MATCHES = new Map();
 // 룰: 5번 맞추면 라운드 승, 최대 7라운드(4선승), 공속(발사쿨) 살짝 느리게
 const RULES = {
   hitsToWinRound: 5,
-  maxRounds: 7,
-  winRounds: 4,          // best of 7
-  shootCooldown: 0.65,   // 원래 0.55 -> 살짝 느리게
+  maxRounds: 10,
+  winRounds: 5,          // best of 7
+  shootCooldown: 0.66,   // 원래 0.55 -> 살짝 느리게
   betweenRoundsSec: 1.2,
 };
 
@@ -694,3 +694,4 @@ server.listen(PORT, () => {
   console.log("Server running on port", PORT);
   console.log("DB_PATH =", DB_PATH);
 });
+
