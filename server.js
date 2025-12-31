@@ -73,9 +73,9 @@ const RULES = {
   // “5번 맞추기” = HP 5
   hpMax: 5,
 
-  // “7판제 + 4선승”
-  maxRounds: 7,
-  targetWins: 4,
+  // “10판제 + 5선승”
+  maxRounds: 10,
+  targetWins: 5,
 
   // 공속/바위 속도 살짝 느리게
   shootCooldown: 0.72, // 이전 0.55보다 느림
@@ -743,4 +743,5 @@ server.listen(PORT, () => {
   console.log("Server running on port", PORT);
   console.log("DB_PATH:", DB_PATH);
 });
+
 
